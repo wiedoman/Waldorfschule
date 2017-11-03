@@ -1,10 +1,26 @@
-char Version[] = "V3.3, Frostschutz, Fenster, Sensorfehler, Heizlüfter vor Unterricht";
-// V3.3, 
+char Version[] = "V3.4";
+// V3.4, 
 //    Tasterdelay = 100ms wg. Störungen im Kasten und langem Kabel
 //    Temperaturprüfung und Wert einfrieren wenn Temperatursensorwert unplausibel, 
 //    Init auf 22 falls der Temperatursensor noch nie einen plausiblen Wert geliefert hat
 //    1°C Hysterese bei den Übergängen aller Heizungsstufen 
 //    Ist die Temperatur beim Anfordern des 2h heizens kleiner 17°C wird auch gleich der Lüfter mit eingeschaltet
+//    Bessere Simulationsmöglichkeit durch Vorgabe der Isttemperatur per Serial.Read
+//      +, bzw. +++, oder -, bzw. -----, erhöht bzw. reduziert die Isttemperatur um 0,1°C per Zeichen und bleibt bis ein * gesendet wird
+//      Die Zeitfenster für Lüften, Heizstufenerhöhung usw. können manipuliert werden und werden mit einem * wieder zurückgesetzt
+//        lxx = Zeitfenster für die Heizungsabschaltung für die Lüftungserkennung auf xx Sekunden setzen
+//        dxx = Deltatemperatur für die Erkennung eines offenen Fensters
+//        hxx = Zeitfenster für die Heizstufenerhöhung auf xx Sekunden setzen
+//        ixx = Isttemperatur auf xx°C setzen, nur ganzzahlige Werte
+//        fxx = Zeitfernster für Heizanforderung
+//        jxxxx = Jahr angeben für Zeiteinstellung mit dem Befehl 'z'
+//        mxx = Monat angeben für Zeiteinstellung mit dem Befehl 'z'
+//        txx = Tag angeben für Zeiteinstellung mit dem Befehl 'z'
+//        sxx = Stunde angeben für Zeiteinstellung mit dem Befehl 'z'
+//        nxx = Minute angeben für Zeiteinstellung mit dem Befehl 'z'
+//        exx = Sekunde angeben für Zeiteinstellung mit dem Befehl 'z'
+//        z   = angegebene Zeit und Datum aus letzter Zeila an RTC schicken
+//        *   = Zurücksetzen der Werte
 
 // Heizung ist auf 22° eingestellt (unter der Decke) 
 // Am Wochendene und in den Ferien wird nicht geheizt.
@@ -45,33 +61,55 @@ char Version[] = "V3.3, Frostschutz, Fenster, Sensorfehler, Heizlüfter vor Unte
 
 #define ONE_WIRE_BUS 10               // Sensor an Pin 10
 
+#define SERbaud     115200            // Baudrate der Seriellen Schnittstelle
+#define HYSadd       0                // Hysteresetemperatur in °C für die Erhöhung der Heizstufe
+#define HYSsub      -2                // Hysteresetemperatur in °C für die Senkung der Heizstufe
+#define HYSplus     -1                // Hysteresetemperatur in °C für ds Löschen der Heizstufenerhöhung
+#define ZLUEFTbeob  30                // Zeitfenster für das Beobachten der Isttemperatur zur Erkennung eines offenen Fensters
+#define ZLUEFT      600               // Zeitfenster für Lüftbetrieb, währenddessen die Heizungen ausgeschaltet werden
+#define LUEFTtemp    1                // Temperatur um die sich die Isttemperatur senken muss um ein offenes Fenster zu erkennen
+#define TLUEFTinit  -100              // Initialisierungstemperatur für offene Fenster Erkennung
+#define TLUEFTERvor 15                // Temperatur unter der der Heizlüfter bei der 2h Heizanforderung mit eingeschalter wird
+#define ENTPRELLlow 10                // Entprellzeit für die Low Erkennung des Taster in ms
+#define ENTPRELL    100               // Allgemeine Entprellung von 100ms
+#define oneSECOND   1000              // Allgemeine Entprellung während der Initialisierung
+#define twoSECONDS  2000              // Zeit für die Erkennung der Lüfterschaltanforderung
+#define sollTEMP    22                // Grundsolltemperatur
+#define ZHEIZ       7200              // Zeitfenster für Heizanforderung
+#define ZSTUFE      600               // Zeitfenster für die Heizstufenüberwachung nach der falls Stufe < 3 und die Zieltemperatur nicht erreicht wurde die Stufe wieder erhöht wird
+#define ZLED        300               // LED Blinkdelay
+#define TFROST      5                 // Temperaturschwelle für Frostschutz
+
 OneWire oneWire(ONE_WIRE_BUS);        // OneWire Netzwerk erstellen
 DallasTemperature sensor(&oneWire);   // Sensor mit OneWire verbinden
 DeviceAddress insideThermometer;      // Adressspeicher des Sensors
 
-float temperatur = 22, SollTemperatur, lueftTemperatur=-100, regelAbweichung;    // Temperaturen
+float temperatur=sollTEMP,SollTemperatur,lueftTemperatur=-100,regelAbweichung,vTIST;    // Temperaturen
 signed char DIP=0;                                              // DIP Schalter für Temperaturkorrekturen
-int relAn=0,  SZ=0,  heizungsStufe=0, heizungsStufePlus=0, relAnAlt=0;
+int relAn=0,SZ=0,heizungsStufe=0,heizungsStufePlus=0,relAnAlt=0;
 uint32_t HeizanforderungsEnde=0, intervallZeit=0, lueftenBeginn, stufenReduktion, anforderungAnZeit, anforderungAusZeit;    // Zeitstempel 
-uint8_t tasterAlt=1, tasterLow = 0, luefterVorheizen = 0,luefterVorheizenA = 0,heizungsLuefterAnforderung=0, heizungsLuefter=0,angefordert=0,Unterricht=0,lueften = 0,blinken=0,sehrKalt=0;
+uint8_t tasterAlt=true,tasterLow=false,luefterVorheizen=false,luefterVorheizenA=false,heizungsLuefterAnforderung=false,heizungsLuefter=false,angefordert=false,Unterricht=false,lueften=false,blinken=false,sehrKalt=0,inByte;
 unsigned long loopzeit;                                         // millis() Ergbenis
+
+uint8_t vTFROST; // Debugwerte
+int vZLUEFT,vZSTUFE,vZHEIZ,vJahr,vMonat,vTag,vStunde,vMinute,vSekunde,vLUEFTtemp; // Debugwerte
 
 RTC_DS1307 RTC;                       // RTC Object
 
-#define RelaisAn LOW                  // Relais Massegesteuert
+#define RelaisAn  LOW                 // Relais Massegesteuert
 #define RelaisAus HIGH
 #define relais1 A0                    // Relais für 750W Ansteuerung
 #define relais2 A1                    // Relais für 1250W Ansteuerung (Rel 1+2 = 2000W)
 #define relais3 A2                    // Relais für Lüfteransteuerung in den Heizungen
-#define dip1 9                        // Ports der 6 DIP Schalter
-#define dip2 8
-#define dip3 7
-#define dip4 6
-#define dip5 5
-#define dip6 4
-#define LEDrot 11                     // mittlerweise blaue LED am externen Bedienteil für Heizanforderungsbestätigung
+#define dip1     9                    // Ports der 6 DIP Schalter
+#define dip2     8
+#define dip3     7
+#define dip4     6
+#define dip5     5
+#define dip6     4
+#define LEDrot  11                    // mittlerweise blaue LED am externen Bedienteil für Heizanforderungsbestätigung
 #define LEDgelb 12                    // gelbe LED an der Steuerung für die Anzeige ob mindestens ein Releis angesteuert wurde, blinken = geöffnetes Fenster erkannt
-#define Taster 2                      // Taster wg. Interruptsteuerung an PIN 2
+#define Taster   2                    // Taster wg. Interruptsteuerung an PIN 2
 
 //  Ferienzeiten 2014 - 2023
 //------------------------------------------------------------------------------------------------------------------------------
@@ -111,6 +149,13 @@ const byte FerienMonat23[20]  = { 1, 1, 2, 2, 4, 4, 5, 5, 5, 5, 5, 6, 7, 9,10,10
 byte FerienTag[20],FerienMonat[20];             // Kopie der Feriendaten des aktuellen Jahres
 byte Auswertung[20];                            // Hilfstabelle für die Auswertung der Unterrichtszeiten und der Ermittlung was aktuell ist, 
 
+void initValues(void);
+float getValue(void);
+void Anforderung(void);
+void clearAndHome(uint8_t x, uint8_t y);
+boolean Sommerzeit(void);
+byte Ferien(void);
+
 void setup(void)
 {
   pinMode(relais1, OUTPUT);            // Relais an Pin A0 
@@ -120,81 +165,164 @@ void setup(void)
   pinMode(relais3, OUTPUT);            // Relais an Pin A2
   digitalWrite(relais3, RelaisAus);
   pinMode(LEDrot, OUTPUT);             // rot LED an Pin 11
-  digitalWrite(LEDrot, 0);
+  digitalWrite(LEDrot, LOW);
   pinMode(LEDgelb, OUTPUT);            // gelb LED an Pin 12
-  digitalWrite(LEDgelb, 0);
-  pinMode(dip1, INPUT_PULLUP);         // DIP 1-6 an Pins 9-4
-  pinMode(dip2, INPUT_PULLUP);
-  pinMode(dip3, INPUT_PULLUP);
-  pinMode(dip4, INPUT_PULLUP);
-  pinMode(dip5, INPUT_PULLUP);
-  pinMode(dip6, INPUT_PULLUP);
+  digitalWrite(LEDgelb, LOW);
+  pinMode(dip1,   INPUT_PULLUP);       // DIP 1-6 an Pins 9-4
+  pinMode(dip2,   INPUT_PULLUP);
+  pinMode(dip3,   INPUT_PULLUP);
+  pinMode(dip4,   INPUT_PULLUP);
+  pinMode(dip5,   INPUT_PULLUP);
+  pinMode(dip6,   INPUT_PULLUP);
   pinMode(Taster, INPUT_PULLUP);       // Taster an Pin 2
-  Serial.begin(115200);                // Für die Ausgabe auf dem Terminal
+  Serial.begin(SERbaud);               // Für die Ausgabe auf dem Terminal
   sensor.begin();                      // Sensor Bibliothek starten
   sensor.getAddress(insideThermometer, 0); // Abdresse des Sensors ermitteln
   Wire.begin();                        // I2C anschalten
   RTC.begin();                         // Kommunikation zur RTC beginnen
-  delay(1000);                         // Notwendiges delay wg. RTC
+  delay(oneSECOND);                    // Notwendiges delay wg. RTC
   sensor.requestTemperatures();        // onewire Protokoll für Dallas DS1820 Temperatursensor
-  delay(1000);                         // Notwendiges delay wg. onewire
+  delay(oneSECOND);                    // Notwendiges delay wg. onewire
   loopzeit = millis();                 // Startzeit merken 
   attachInterrupt(digitalPinToInterrupt(Taster), Anforderung, FALLING); // Taster an PIN 2, löst Interruptgesteuert Unterfunktion Anforderung() aus
   // ### RTC.adjust(DateTime(__DATE__,__TIME__));
   // ### Uhr stellen - 2mal flashen, einmal mit der Zeit (im Sommer -1h von der aktuellen Zeit weil der Code +1 macht
   // ### danach unbedingt noch ein zweites mal flashen mit auskommentierter Zeile zum Zeit stellen
   // ### damit die RTC frei läuft
-  // RTC.adjust(DateTime("Oct 31 2017", "17:47:30")); // Sommerzeit !! im Sommer -1h weil der Code +1 macht
+  // RTC.adjust(DateTime(/*J*/2017,/*M*/8,/*T*/1,/*H*/17,/*M*/40,/*S*/30));// Sommerzeit !! im Sommer -1h weil der Code +1 macht
+  initValues();
 }
 
 void loop(void)
 { 
-  clearAndHome();                               // Terminalfenster Cursorsteuerung auf Pos 0,0, oben links
+  if(Serial.available())
+  {
+    clearAndHome(10,58);                        // Terminalfenster Cursorsteuerung auf Pos 0,0, oben links
+    Serial.print(F("sim:          "));
+    clearAndHome(10,62);
+    while(Serial.available()) 
+    {
+       inByte = Serial.read();
+       Serial.print(char(inByte));
+       if(inByte==42) initValues();           // * erkannt und Debugwerte löschen
+       if(inByte==105)                        // i erkannt und Isttemperatur setzen
+       {
+        vTIST = getValue();
+        Serial.print(vTIST);
+       }
+       if(inByte==43)                         // + erkannt und Isttemperatur um 0,1°C erhöhen
+       {
+        vTIST = vTIST + 0.1;
+       }
+       if(inByte==45)                         // - erkannt und Isttemperatur um 0,1°C senken
+       {
+        vTIST = vTIST - 0.1;
+       }
+       if(inByte==108)                        // l erkannt und Zeitfenster für Lüftbetrieb setzen
+       {
+        vZLUEFT = getValue();
+        Serial.print(vZLUEFT);
+       }
+       if(inByte==100)                        // d erkannt und Deltatemperatur für Erkennung offenes Fenster setzen
+       {
+        vLUEFTtemp = getValue();
+        Serial.print(vLUEFTtemp);
+       }
+       if(inByte==104)                        // h erkannt und Zeitfenster für Heizstufenschaltung setzen
+       {
+        vZSTUFE = getValue();
+        Serial.print(vZSTUFE);
+       }
+       if(inByte==102)                        // f erkannt und Zeitfenster für Heizanforderung setzen
+       {
+        vZHEIZ = getValue();
+        Serial.print(vZHEIZ);
+       }
+       if(inByte==106)                        // j erkannt und Jahr für Zeiteinstellung setzen
+       {
+        vJahr = getValue();
+        Serial.print(vJahr);
+       }
+       if(inByte==109)                        // m erkannt und Monat für Zeiteinstellung setzen
+       {
+        vMonat = getValue();
+        Serial.print(vMonat);
+       }
+       if(inByte==116)                        // t erkannt und Tag für Zeiteinstellung setzen
+       {
+        vTag = getValue();
+        Serial.print(vTag);
+       }
+       if(inByte==115)                        // s erkannt und Stunde für Zeiteinstellung setzen
+       {
+        vStunde = getValue();
+        Serial.print(vStunde);
+       }
+       if(inByte==110)                        // n erkannt und Minute für Zeiteinstellung setzen
+       {
+        vMinute = getValue();
+        Serial.print(vMinute);
+       }
+       if(inByte==101)                        // e erkannt und Sekunde für Zeiteinstellung setzen
+       {
+        vSekunde = getValue();
+        Serial.print(vSekunde);
+       }
+       if(inByte==122)                        // z erkannt, Zeit wird an RTC geschickt
+       {
+         RTC.adjust(DateTime(/*Jahr*/vJahr,/*Monat*/vMonat,/*Tag*/vTag,/*Stunde*/vStunde,/*Minute*/vMinute,/*Sekunde*/vSekunde));
+       }
+    }
+  } 
   if(tasterLow)                                 // Taster gedrückt? Für die Erkennung der 2s Betätigung für die Lüfteransteuerung in den Heizungen
   {
-    tasterLow=0;                                // Trigger aus Interruptserviceroutine löschen
-    if(temperatur < 17) luefterVorheizenA = 1;  // Ist die Temperatur beim Anfordern des 2h heizens, dann auch den Lüfter anschalten.
+    clearAndHome(5,0);                          // Terminalfenster Cursorsteuerung auf Pos 0,0, oben links
+    tasterLow=false;                            // Trigger aus Interruptserviceroutine löschen
     anforderungAnZeit=millis();                 // Zeitstempel für die 2s Erkennung
-    delay(10);                                  // Tasterentprellung
-    while(digitalRead(Taster)==0){delay(100);}  // Warten bis der Taster losgelassen wird
+    delay(ENTPRELLlow);                         // Tasterentprellung
+    while(digitalRead(Taster)==0){delay(ENTPRELL);}// Warten bis der Taster losgelassen wird
     anforderungAusZeit = millis();              // zweiter Zeitstempel für die 2s Erkennung
-    Serial.println("              ");           // Zeitstempel und Delta ausgeben
-    Serial.println("              ");
-    Serial.println("              ");
-    Serial.print("                                                        an:");
-    Serial.print(anforderungAnZeit);Serial.println("ms              ");
-    Serial.print("                                                        aus:");
-    Serial.print(anforderungAusZeit);Serial.println("ms              ");
-    Serial.print("                                                        diff:");
-    Serial.print(anforderungAusZeit-anforderungAnZeit);Serial.println("ms              ");
+    Serial.print(F("                                                        an:"));
+    Serial.print(anforderungAnZeit);Serial.println(F("ms              "));
+    Serial.print(F("                                                        aus:"));
+    Serial.print(anforderungAusZeit);Serial.println(F("ms              "));
+    Serial.print(F("                                                        diff:"));
+    Serial.print(anforderungAusZeit-anforderungAnZeit);Serial.println(F("ms              "));
     
-    if(anforderungAusZeit - anforderungAnZeit > 2000) heizungsLuefterAnforderung = 1; else if(anforderungAusZeit - anforderungAnZeit > 100) angefordert = 1;
+    if(anforderungAusZeit - anforderungAnZeit > twoSECONDS) 
+    {
+      heizungsLuefterAnforderung = true; 
+    }
+    else if(anforderungAusZeit - anforderungAnZeit > ENTPRELL) 
+    {
+      angefordert = true;
+      if(temperatur < TLUEFTERvor && !luefterVorheizen) luefterVorheizen = true;// Ist die Temperatur beim Anfordern des 2h heizens, dann auch den Lüfter anschalten.    
+    }
   }
-  if (millis() - loopzeit > 1000)               // Hauptprogramm einmal pro Sekunde bzw. nach Ablauf einer Sekunde berechnen
+  if (millis() - loopzeit > oneSECOND)          // Hauptprogramm einmal pro Sekunde bzw. nach Ablauf einer Sekunde berechnen
   {
-    clearAndHome();                             // Terminalfenster Cursorsteuerung auf Pos 0,0, oben links
+    clearAndHome(0,0);                          // Terminalfenster Cursorsteuerung auf Pos 0,0, oben links
     Serial.println(Version);                    // Programmversion ausgeben
-    Serial.println();                       
     loopzeit = millis();                        // Zeitstempel für nächtste Programmerechnung, siehe oben, 1 Sekunde
     DateTime now = RTC.now();                   // Zeit vom RTC holen
     SZ = Sommerzeit();                          // Prüfen auf Sommerzeit
     if (SZ) now = (now.unixtime() + 3600);      // Wenn Sommerzeit, dann plus eine Stunde 
-    Serial.print("               Zeit = ");     // und Datum und die Uhrzeit ausgeben
+    Serial.print(F("               Zeit = "));     // und Datum und die Uhrzeit ausgeben
     Serial.print(now.day(), DEC);               
-    Serial.print('.');
+    Serial.print(F("."));
     Serial.print(now.month(), DEC);
-    Serial.print('.');
+    Serial.print(F("."));
     Serial.print(now.year(), DEC);      
-    Serial.print(' ');
+    Serial.print(F(" "));
     Serial.print(now.hour(), DEC);
-    Serial.print(':');
+    Serial.print(F(":"));
     Serial.print(now.minute(), DEC);
-    Serial.print(':');
+    Serial.print(F(":"));
     Serial.print(now.second(), DEC);
-    if (SZ) Serial.print(F(" Sommerzeit")); else Serial.print(F(" Winterzeit"));Serial.println("              "); 
+    if (SZ) Serial.print(F(" Sommerzeit")); else Serial.print(F(" Winterzeit"));Serial.println(F("              ")); 
     Serial.print(F("          Wochentag = ")); // auch den Wochentag
     Serial.print(now.dayOfWeek());
-    Serial.print(" = ");
+    Serial.print(F(" = "));
     if(now.dayOfWeek() == 0) Serial.println(F("Sonntag         "));
     if(now.dayOfWeek() == 1) Serial.println(F("Montag          "));
     if(now.dayOfWeek() == 2) Serial.println(F("Dienstag        "));
@@ -203,9 +331,10 @@ void loop(void)
     if(now.dayOfWeek() == 5) Serial.println(F("Freitag         "));
     if(now.dayOfWeek() == 6) Serial.println(F("Samstag         "));
     Serial.print(F("          UNIX-Zeit = ")); // und die Zeit im UNIX Format
-    Serial.print(now.unixtime());Serial.println("s              ");
+    Serial.print(now.unixtime());Serial.println(F("s              "));
   
-    Serial.println(F("   Normaltemperatur = 22°C")); // Normaltemperatur ausgeben (fix 22°)
+    Serial.print(F("   Normaltemperatur = ")); // Normaltemperatur ausgeben 
+    Serial.print(sollTEMP);Serial.println(F("°C "));
   
     DIP=0;                                 // DIP auslesen
     if(!digitalRead(dip6)) DIP += 1; 
@@ -222,43 +351,44 @@ void loop(void)
     Serial.print(digitalRead(dip5));
     Serial.println(digitalRead(dip6));
     Serial.print(F("Temperaturkorrektur = "));// und Korrekturwert von DIP Schalter ausgeben 
-    Serial.print(DIP);Serial.println("°C              ");
+    Serial.print(DIP);Serial.println(F("°C              "));
     
-    SollTemperatur = 22;                    // Solltemperatur (StartWert 22°)
-    SollTemperatur += DIP;                  // Korrekturwert aus DIP addieren
+    SollTemperatur = sollTEMP;                 // Solltemperatur (StartWert 22°)
+    SollTemperatur += DIP;                     // Korrekturwert aus DIP addieren
     Serial.print(F("     Solltemperatur = ")); // und resultierende Solltemperatur ausgeben
-    Serial.print(SollTemperatur);Serial.println("°C              ");
+    Serial.print(SollTemperatur);Serial.println(F("°C "));
   
-    sensor.requestTemperatures();                    // Temperatur von Sensor holen
-    if (sensor.getTempC(insideThermometer) < -100)   // Ist der Sensor fehlerhaft, dann ist der Wert -127°C
+    sensor.requestTemperatures();                        // Temperatur von Sensor holen
+    if (sensor.getTempC(insideThermometer) < TLUEFTinit) // Ist der Sensor fehlerhaft, dann ist der Wert -127°C
     {
-      Serial.print(F("      Isttemperatur = "));     // und ausgeben
-      Serial.print(temperatur);Serial.println("°C Altwert wg. fehlerhaftem Sensor      "); 
+      Serial.print(F("      Isttemperatur = "));         // und ausgeben
+      Serial.print(temperatur);Serial.println(F("°C Altwert wg. fehlerhaftem Sensor")); 
     }
     else
     {
       temperatur = sensor.getTempC(insideThermometer);  // bei nicht fehlerhaftem Sensorwert wird er übernommen
+      if (vTIST) temperatur = vTIST;                    // DEBUG
       Serial.print(F("      Isttemperatur = "));        // und ausgegeben
-      Serial.print(temperatur);Serial.println("°C                                     ");
+      Serial.print(temperatur);Serial.println(F("°C                                 "));
     }
-    if(lueftTemperatur == -100) lueftTemperatur = temperatur;  // Initwert der Lüfttemperatur für die Erkennung eines offenen Fensters
+    if(lueftTemperatur == TLUEFTinit) lueftTemperatur = temperatur;  // Initwert der Lüfttemperatur für die Erkennung eines offenen Fensters
   
-    if ( (now.unixtime() - intervallZeit) > 30){       // Innerhalb eines Zeitfensters von 30 Sekunden wird die Temperatur überwacht
-      lueftTemperatur = temperatur;                    // Zu Beginn des Zeitfensters wird der Temperaturwert eingefroren 
-      intervallZeit = now.unixtime();                  // Zeitstempel für nächstes 30s Fenster 
+    if ( (now.unixtime() - intervallZeit) > ZLUEFTbeob){// Innerhalb eines Zeitfensters von 30 Sekunden wird die Temperatur überwacht
+      lueftTemperatur = temperatur;                     // Zu Beginn des Zeitfensters wird der Temperaturwert eingefroren 
+      intervallZeit = now.unixtime();                   // Zeitstempel für nächstes 30s Fenster 
     }
     Serial.print(F("          Deltazeit = "));          // Zeitfenster
-    Serial.print(now.unixtime()-intervallZeit);Serial.println("s (max 30s)             ");
+    Serial.print(now.unixtime()-intervallZeit);Serial.println(F("s (max 30s)             "));
     Serial.print(F("    Deltatemperatur = "));          // Temperaturänderung innerhalb des Zeitfensters
-    Serial.print(temperatur - lueftTemperatur);Serial.println("°C              ");
-    if(!lueften && ((lueftTemperatur - temperatur) > 1)) {  // Hat sich die Temperatur innerhalb des Zeitfernsters um 1°C gesenkt
-      lueften = 1;                                          // Wird Lüften erkannt
-      lueftenBeginn = now.unixtime();                       // Zeitstempel für die 10min Lüftungsfunktion, während dessen, die Heizung ausgeschaltet wird
+    Serial.print(temperatur - lueftTemperatur);Serial.print(F("°C (max -"));Serial.print(vLUEFTtemp);Serial.println(F("°C)             "));
+    if(!lueften && ((lueftTemperatur - temperatur) > vLUEFTtemp)) {  // Hat sich die Temperatur innerhalb des Zeitfernsters um 1°C gesenkt
+      lueften = true;                                          // Wird Lüften erkannt
+      lueftenBeginn = now.unixtime();                          // Zeitstempel für die 10min Lüftungsfunktion, während dessen, die Heizung ausgeschaltet wird
     }
-    Serial.print(F("            Lueften = "));          // und ausgeben
-    if(lueften) {                                       // Ausgabe des Lüftungsstatus
-      if(now.unixtime()-lueftenBeginn > 600) lueften = 0; // Nach Ablauf der 10min wird der Lüftungsstatus zurück genommen
-      Serial.print(now.unixtime() - lueftenBeginn);Serial.println("s (max 600s)              ");
+    Serial.print(F("            Lueften = "));                    // und ausgeben
+    if(lueften) {                                                 // Ausgabe des Lüftungsstatus
+      if(now.unixtime()-lueftenBeginn > vZLUEFT) lueften = false; // Nach Ablauf der 10min wird der Lüftungsstatus zurück genommen
+      Serial.print(now.unixtime() - lueftenBeginn);Serial.print(F("s (max "));Serial.print(vZLUEFT);Serial.println(F("s)              "));
     }
     else {
       Serial.println(F("Fenster geschlossen             "));
@@ -266,19 +396,19 @@ void loop(void)
   
     if(angefordert)                 // Taster gedrückt?
     {                            
-      angefordert = 0;              // Anforderungsstatus zurücknehmen für nächste Anforderung, dann wird das 2h Fenster neu begonnen
-      HeizanforderungsEnde = now.unixtime()+7200; // Heizanforderungszeit setzen auf 2 Stunden
+      angefordert = false;              // Anforderungsstatus zurücknehmen für nächste Anforderung, dann wird das 2h Fenster neu begonnen
+      HeizanforderungsEnde = now.unixtime()+vZHEIZ; // Heizanforderungszeit setzen auf 2 Stunden
       Serial.println(F("             Taster = 1       "));     // Heizanforderungstaste ausgeben
-      digitalWrite(LEDrot, 0);      // Bestätigung für den Benutzer durch mehrmaliges Blinken der blauen LED
-      delay(100);
-      digitalWrite(LEDrot, 1);
-      delay(100);
-      digitalWrite(LEDrot, 0);
-      delay(100);
-      digitalWrite(LEDrot, 1);
-      delay(100);
-      digitalWrite(LEDrot, 0);
-      delay(100);
+      digitalWrite(LEDrot, false);      // Bestätigung für den Benutzer durch mehrmaliges Blinken der blauen LED
+      delay(ENTPRELL);
+      digitalWrite(LEDrot, true);
+      delay(ENTPRELL);
+      digitalWrite(LEDrot, false);
+      delay(ENTPRELL);
+      digitalWrite(LEDrot, true);
+      delay(ENTPRELL);
+      digitalWrite(LEDrot, false);
+      delay(ENTPRELL);
     }
     else
     {
@@ -287,57 +417,53 @@ void loop(void)
 
     if(heizungsLuefterAnforderung)  // Wurde eine 2s Tasterbetätigung erkannt, dann werden die Lüfter der Heizungen eingeschaltet
     {
-      heizungsLuefterAnforderung=0; // Anforderung für die nächste Anforderung löschen
+      heizungsLuefterAnforderung=false; // Anforderung für die nächste Anforderung löschen
       if(luefterVorheizen)          // Falls der Benutzer die Lüfter nicht angefordert hatte, dann liegt eine Anforderung
       {                             // für die Lüfter vom Vorheizen vor, dann wird die zurück genommen
-        luefterVorheizen = 0;
+        luefterVorheizen = false;
       }
-      if(luefterVorheizenA)          // Falls der Benutzer die Lüfter nicht angefordert hatte, dann liegt eine Anforderung
-      {                             // für die Lüfter vom Vorheizen vor, dann wird die zurück genommen
-        luefterVorheizenA = 0;
-      }
-      if(heizungsLuefter)      // Falls keine Anforderung durch das Vorheizen vorlag, dann wird die Anforderung des Benutzer
+      else if(heizungsLuefter)      // Falls keine Anforderung durch das Vorheizen vorlag, dann wird die Anforderung des Benutzer
       {                             // zurück genommen falls eine vorlag
-        heizungsLuefter = 0; 
+        heizungsLuefter = false; 
       }
       else
       {
-        heizungsLuefter = 1;        // lag gar keine Anforderung vor, dann werden die Lüfter in den Heizungen eingeschaltet
+        heizungsLuefter = true;        // lag gar keine Anforderung vor, dann werden die Lüfter in den Heizungen eingeschaltet
       }
     }
     
     // Unterrichtszeit ? Dann heizen von 03:00 bis 17:00, wenn nicht kalt kann Heizbeginn bis 07:00 verzögern
     Serial.print(F("         Auswertung = "));     // Ausgabe Ferien oder Unterricht
     if(now.hour() >= 8) sehrKalt = 0;              // Die Vorheizanforderung wird nach Unterrichtsbeginn zurück genommen
-    if(now.hour() >= 7 && now.minute() >= 45) luefterVorheizen = 0;   // Die Lüfteranforderung durch das Vorheizen wird 15min vor Unterrichtsbeginn zurück genommen
-    if(!sehrKalt && now.hour() == 3 && temperatur <  8) {sehrKalt = 5; luefterVorheizen = 1; heizungsStufePlus = 3;}
-    if(!sehrKalt && now.hour() == 4 && temperatur < 12) {sehrKalt = 4; luefterVorheizen = 1; heizungsStufePlus = 3;}
-    if(!sehrKalt && now.hour() == 5 && temperatur < 16) {sehrKalt = 3; luefterVorheizen = 1; heizungsStufePlus = 2;}
-    if(!sehrKalt && now.hour() == 6 && temperatur < 19) {sehrKalt = 2; luefterVorheizen = 1; heizungsStufePlus = 1;}
-    if(!sehrKalt && now.hour() == 7 && temperatur < 22) {sehrKalt = 1; luefterVorheizen = 1; heizungsStufePlus = 1;}
+    if(now.hour() >= 7 && now.minute() >= 45) luefterVorheizen = false;   // Die Lüfteranforderung durch das Vorheizen wird 15min vor Unterrichtsbeginn zurück genommen
+    if(!sehrKalt && now.hour() == 3 && temperatur <  8) {sehrKalt = 5; luefterVorheizen = true; heizungsStufePlus = 2;}
+    if(!sehrKalt && now.hour() == 4 && temperatur < 12) {sehrKalt = 4; luefterVorheizen = true; heizungsStufePlus = 2;}
+    if(!sehrKalt && now.hour() == 5 && temperatur < 16) {sehrKalt = 3; luefterVorheizen = true; heizungsStufePlus = 1;}
+    if(!sehrKalt && now.hour() == 6 && temperatur < 19) {sehrKalt = 2; luefterVorheizen = true; heizungsStufePlus = 0;}
+    if(!sehrKalt && now.hour() == 7 && temperatur < 22) {sehrKalt = 1; luefterVorheizen = true; heizungsStufePlus = 0;}
     if(now.dayOfWeek() == 0 || now.dayOfWeek() == 6) // Samstag oder Sonntag = Wochenende
     {
       Serial.println(F("Wochenende          "));     // Ausgabe des Status ob Wochende oder Ferien oder Unterricht 
-      Unterricht = 0;                                // Nur wenn Unterricht erkannt wird, wird automatisch geheizt, bzw. bei sehr tiefen Temperaturen entsprechend vorgeheizt
+      Unterricht = false;                                // Nur wenn Unterricht erkannt wird, wird automatisch geheizt, bzw. bei sehr tiefen Temperaturen entsprechend vorgeheizt
     }
-    else if(Ferien()) Unterricht = 0;                // Prüfung ob Ferien (siehe Unterfunktion Ferien()) 
+    else if(Ferien()) Unterricht = false;                // Prüfung ob Ferien (siehe Unterfunktion Ferien()) 
     else if(now.hour() >= (8-sehrKalt) && now.hour() < 16) // Heizungsbeginn falls keine der vorherigen Bedingungen eintraf
     {
-      Unterricht = 1;                                // automatisches heizen während dem Unterricht 
+      Unterricht = true;                                // automatisches heizen während dem Unterricht 
       Serial.print(F("Unterricht Heizungsbeginn: 0")); // Heizungsstart ausgeben
       Serial.print(8-sehrKalt);
       Serial.println(F(":00 Uhr     "));
     }
     else 
     {
-      Unterricht = 0;                                // falls nach 16:00 oder vor Vorheizbeginn werden die Heizungen ausgeschaltet
+      Unterricht = false;                                // falls nach 16:00 oder vor Vorheizbeginn werden die Heizungen ausgeschaltet
       Serial.println(F("Unterrichtstag aber ausserhalb Unterrichtszeit    "));
     }
                    
     Serial.print(F("  Anforderung Zeit  = "));              // Heizanforderung
     if(HeizanforderungsEnde > now.unixtime() || Unterricht) // Während der Heizanforderung 
     {
-      digitalWrite(LEDrot, 1);                              // rote LED an
+      digitalWrite(LEDrot, HIGH);                              // rote LED an
       if(HeizanforderungsEnde > now.unixtime())             // wenn Anforderung aufgrund Taster
       {
         int z,h,m;
@@ -345,31 +471,32 @@ void loop(void)
         h = z/3600;
         m = (z/60)-(z/3600*60);
         Serial.print(h);                                   // verbleibende Zeit berechnen
-        Serial.print(":");                                 // und ausgeben  
+        Serial.print(F(":"));                                 // und ausgeben  
         Serial.print(m);                                   // verbleibende Zeit berechnen
-        Serial.print(":");                                 // und ausgeben  
+        Serial.print(F(":"));                                 // und ausgeben  
         Serial.print(z-(3600*h)-(60*m));                   // verbleibende Zeit berechnen
-        Serial.println("            ");                    
+        Serial.print(F(" (max "));Serial.print(vZHEIZ);Serial.println(F("s)           "));                    
       }
       else
       {
-        Serial.println("0s           ");                   // sonst 0s ausgeben
+        Serial.println(F("0s           "));                   // sonst 0s ausgeben
       }
-      regelAbweichung = SollTemperatur - temperatur;       // Temperaturdelta des Reglers (Ist - Soll)
-      Serial.print(F("   Reglerabweichung = ")); Serial.print(regelAbweichung); Serial.println("°C   ");
-      Serial.print(F("    Heizanforderung = Stufe "));     // Heizanforderungsstufe ausgeben 0=aus, 1=750W, 2=1250W, 3=2000W
-      if(regelAbweichung < -1) heizungsStufePlus = 0;      // bei Heizende die Stufenerhöhung zurück nehmen
-      if(regelAbweichung - float(heizungsStufe) >  1) heizungsStufe++;// Stufe erhöhen?
-      if(regelAbweichung - float(heizungsStufe) < -1) heizungsStufe--;// Stufe erniedrigen?
-      Serial.print("roh:");Serial.print(heizungsStufe);
+      regelAbweichung = SollTemperatur - temperatur;                      // Temperaturdelta des Reglers (Ist - Soll)
+      Serial.print(F("   Reglerabweichung = ")); 
+      Serial.print(regelAbweichung); Serial.println(F("°C   "));
+      Serial.print(F("    Heizanforderung = Stufe "));                    // Heizanforderungsstufe ausgeben 0=aus, 1=750W, 2=1250W, 3=2000W
+      if(regelAbweichung < HYSplus) heizungsStufePlus = 0;                // bei Heizende die Stufenerhöhung zurück nehmenh3
+      if(regelAbweichung - float(heizungsStufe) > HYSadd) heizungsStufe++;// Stufe erhöhen?
+      if(regelAbweichung - float(heizungsStufe) < HYSsub) heizungsStufe--;// Stufe erniedrigen?
+      Serial.print(F("roh:"));Serial.print(heizungsStufe);
       if(heizungsStufe < 0) heizungsStufe = 0; if(heizungsStufe > 3) heizungsStufe = 3;       // Stufe nur zwichen 0 und 3 erlaubt
-      Serial.print(", begrenzt:");Serial.print(heizungsStufe);
+      Serial.print(F(", begrenzt:"));Serial.print(heizungsStufe);
       relAn = heizungsStufe + heizungsStufePlus;           // Stufenerhöhung berücksichtigen
       if(relAn < 0) relAn = 0; if(relAn > 3) relAn = 3;    // Stufe nur zwichen 0 und 3 erlaubt
-      Serial.print(", final:");
-      Serial.print(relAn);Serial.println("              ");
+      Serial.print(F(", final:"));
+      Serial.print(relAn);Serial.println(F("              "));
       if(relAnAlt > relAn || relAn == 3) stufenReduktion = now.unixtime(); // Nach Stufenreduktion 10min Fenster starten
-      if(relAn && (now.unixtime() - stufenReduktion) > 600)// wenn die Heizungsstufe in den letzten 10min nicht reduziert wurde, wieder erhöhen
+      if(relAn && (now.unixtime() - stufenReduktion) > vZSTUFE)// wenn die Heizungsstufe in den letzten 10min nicht reduziert wurde, wieder erhöhen
       {
          if (heizungsStufePlus < 2) heizungsStufePlus++;   // Heizstufenerhöhung erhöhen
          stufenReduktion = now.unixtime();                 // 10 min Fenster neu beginnen
@@ -378,16 +505,17 @@ void loop(void)
     }
     else                                                   // wenn keine Heizanforderung 
     {
-      digitalWrite(LEDrot, 0);                             // dann rote LED aus   
-      Serial.println("0s           ");                     // Ausgeben
+      digitalWrite(LEDrot, LOW);                           // dann rote LED aus   
+      Serial.println(F("0s           "));                  // Ausgeben
       relAn = 0;                                           // Und Relais aus
-      Serial.println(F("    Heizanforderung = 0             "));// Heizanforderung ausgeben
-    }
+      heizungsLuefter = false;luefterVorheizen = false;    // Heizlüfter aus
+      Serial.println(F("    Heizanforderung = 0                             "));// Heizanforderung ausgeben
+    } 
     Serial.print(F(" Heizstufenerhöhung = "));      // Ausgabe der relsutierenden Erhöhung der Heizstufe wg. zu langer Heizdauer
-    Serial.print(heizungsStufePlus);Serial.println("              ");
+    Serial.print(heizungsStufePlus);Serial.println(F("              "));
     if(!relAn) stufenReduktion = now.unixtime();    // bei ausgeschalteter Heizung läuft das 10min Fenster nicht
     Serial.print(F("seit ltz. Reduktion = "));      // Ausgabe des 10min Zeitfensters
-    Serial.print(now.unixtime() - stufenReduktion);Serial.println("s (max 600s)             ");
+    Serial.print(now.unixtime() - stufenReduktion);Serial.print(F("s (max "));Serial.print(vZSTUFE);Serial.println(F("s)             "));
     
     Serial.print(F(" Heizungsrelais 1,2 = "));  // Status der Relais ausgeben und Relais schalten ...
     if(relAn)
@@ -396,9 +524,9 @@ void loop(void)
         Serial.println(F("aus wegen geoeffnetem Fenster"));
         stufenReduktion = now.unixtime();      // 10min Fenster während dem Lüften zurück setzen
         digitalWrite(relais1, RelaisAus);      // Heizung ausschalten
-        delay(300);
+        delay(ZLED);
         digitalWrite(relais2, RelaisAus); 
-        if(blinken) blinken = 0; else blinken=1; // LED blinken lassen 
+        if(blinken) blinken = false; else blinken=true; // LED blinken lassen 
         digitalWrite(LEDgelb, blinken);          // gelbe LED aus = Heizungen aus
       }
       else{
@@ -406,47 +534,48 @@ void loop(void)
         {                                        // Stufe eins 750W Relais 1 an und Relais 2 aus  
           Serial.println(F("1=an, 2=aus, 750W              "));
           digitalWrite(relais1, RelaisAn);       // Heizung anschalten
-          delay(300);
+          delay(ZLED);
           digitalWrite(relais2, RelaisAus);       
-          digitalWrite(LEDgelb, 1);              // gelbe LED an = Heizungen an
+          digitalWrite(LEDgelb, HIGH);              // gelbe LED an = Heizungen an
         }
         if(relAn == 2)                           // Stufe zwei 1250W Relais 1 aus und Relais 1 an
         {
           Serial.println(F("1=aus, 2=an, 1250W                   "));
           digitalWrite(relais1, RelaisAus);      // Heizung anschalten
-          delay(300);
+          delay(ZLED);
           digitalWrite(relais2, RelaisAn);       
-          digitalWrite(LEDgelb, 1);              // gelbe LED an = Heizungen an
+          digitalWrite(LEDgelb, HIGH);              // gelbe LED an = Heizungen an
         }
         if(relAn == 3)                           // Stufe drei 2000W Relais 1 und Relais 2 an
         {
           Serial.println(F("1=an, 2=an, 2000W                     "));
           digitalWrite(relais1, RelaisAn);       // Heizung anschalten
-          delay(300);
+          delay(ZLED);
           digitalWrite(relais2, RelaisAn);       
-          digitalWrite(LEDgelb, 1);              // gelbe LED an = Heizungen an
+          digitalWrite(LEDgelb, HIGH);              // gelbe LED an = Heizungen an
         }
       }
     }
-    else if (temperatur < 5)                     // Bei Temperatur unter 5°C wird die Heizung auf Stufe 750W eingeschaltet
+    else if (temperatur < vTFROST)                     // Bei Temperatur unter 5°C wird die Heizung auf Stufe 750W eingeschaltet
     {
       Serial.println(F("1=an, 2=aus, 750W  Frostschutz   "));
       digitalWrite(relais1, RelaisAn);           // Relais 1 an 
-      delay(300);
+      delay(ZLED);
       digitalWrite(relais2, RelaisAus);          // Relais 2 aus
-      digitalWrite(LEDgelb, 1);                  // gelbe LED an = Heizungen an
+      digitalWrite(LEDgelb, HIGH);                  // gelbe LED an = Heizungen an
     }
     else
     {
       Serial.println(F("aus                                          ")); // Stufe 0 null 0W beide Relais aus
       digitalWrite(relais1, RelaisAus);      // Heizung ausschalten
-      delay(300);
+      delay(ZLED);
       digitalWrite(relais2, RelaisAus); 
-     digitalWrite(LEDgelb, 0);               // gelbe LED aus = Heizungen aus
+      digitalWrite(LEDgelb, LOW);               // gelbe LED aus = Heizungen aus
+      heizungsLuefter = false;luefterVorheizen = false;    // Heizlüfter aus
     }
 
     Serial.print(F("   Heizlüfterrelais = "));// Status der Relais ausgeben und Relais schalten ...
-    if(luefterVorheizen || luefterVorheizenA) // Anforderung der Heizungslüfter aus Vorheizanforderung
+    if(luefterVorheizen)                      // Anforderung der Heizungslüfter aus Vorheizanforderung
     {
       Serial.println(F("an vorheizen    "));
       digitalWrite(relais3, RelaisAn);        // Heizlüfter anschalten
@@ -464,6 +593,10 @@ void loop(void)
         digitalWrite(relais3, RelaisAus);     // Heizlüfter anschalten
       }
     }
+    Serial.print(F("   Zeit einstellen? = "));// Zeitstring um die Zeit einstellen zu können, an RTC senden mit 'z' + Enter im Terminal
+    Serial.print(vTag);Serial.print(F("."));Serial.print(vMonat);Serial.print(F("."));Serial.print(vJahr);Serial.print(F(" "));
+    Serial.print(vStunde);Serial.print(F(":"));Serial.print(vMinute);Serial.print(F(":"));Serial.print(vSekunde);Serial.println(F("    "));
+    Serial.println(F("                                                       "));
   }
 }
 
@@ -666,10 +799,14 @@ boolean Sommerzeit(void)
 }
 
 
-void clearAndHome()
+void clearAndHome(uint8_t x, uint8_t y)
 {
   Serial.write(27);      // ESC
-  Serial.print("[1;1H"); // cursor to home
+  Serial.print(F("["));
+  Serial.print(x);
+  Serial.print(F(";"));
+  Serial.print(y);
+  Serial.print(F("H")); 
 } 
 
 void Anforderung()       // Interruptservice Routine
@@ -677,4 +814,65 @@ void Anforderung()       // Interruptservice Routine
   tasterLow = 1;         // Tasterbetätigung merken, Hauptprogramm frägt den Status ab und löscht ihn nach der Bearbeitung
 }
 
+
+void initValues()
+{
+  // SERbaud     115200            // Baudrate der Seriellen Schnittstelle
+  // HYSadd       1                // Hysteresetemperatur in °C für dier Erhöhung der Heizstufe
+  // HYSsub      -1                // Hysteresetemperatur in °C für dier Senkung der Heizstufe
+  // ZLUEFTbeob  30                // Zeitfenster für das Beobachten der Isttemperatur zur Erkennung eines offenen Fensters
+  // ZLUEFT      600               // Zeitfenster für Lüftbetrieb, währenddessen die Heizungen ausgeschaltet werden
+  // LUEFTtemp    1                // Temperatur um die sich die Isttemperatur senken muss um ein offenes Fenster zu erkennen
+  // TLUEFTinit  -100              // Initialisierungstemperatur für offene Fenster Erkennung
+  // TLUEFTERvor 17                // Temperatur unter der der Heizlüfter bei der 2h Heizanforderung mit eingeschalter wird
+  // ENTPRELLlow 10                // Entprellzeit für die Low Erkennung des Taster in ms
+  // ENTPRELL    100               // Allgemeine Entprellung von 100ms
+  // oneSECOND   1000              // Allgemeine Entprellung während der Initialisierung
+  // twoSECONDS  2000              // Zeit für die Erkennung der Lüfterschaltanforderung
+  // sollTEMP    22                // Grundsolltemperatur
+  // ZHEIZ       7200              // Zeitfenster für Heizanforderung
+  // ZSTUFE      600               // Zeitfenster für die Heizstufenüberwachung nach der falls Stufe < 3 und die Zieltemperatur nicht erreicht wurde die Stufe wieder erhöht wird
+  // ZLED        300               // LED Blinkdelay
+  // TFROST      5                 // Temperaturschwelle für Frostschutz
+  vTFROST = TFROST;
+  vTIST   = 0;
+  vZLUEFT = ZLUEFT;
+  vZHEIZ  = ZHEIZ;
+  vZSTUFE = ZSTUFE;
+  vLUEFTtemp = LUEFTtemp;
+  DateTime now = RTC.now();                   // Zeit vom RTC holen
+  vJahr=now.year();
+  vMonat=now.month();
+  vTag=now.day();
+  vStunde=now.hour();
+  vMinute=now.minute();
+  vSekunde=now.second();
+}
+
+float getValue() // Eingabe vom Serial Terminal in float umwandeln und zurück geben
+{
+    uint8_t a=0,b;
+    int d=0,e=10;
+    float c=0;
+    while(Serial.available()) 
+    {
+      b = Serial.read();
+      if(b==13){} else if(b==44)
+      {
+        a=1; // Kommastelle erkannt
+      }
+      else
+      {
+        if(a)// rechts vom Komma
+        {
+          c=c+float(b-48)/e; e=e*10;
+        }
+        else// links vom Komma
+        {
+          if(d)c=c*10; d=1; c=c+float(b-48);
+        }
+      }
+    }
+    return c;
+}
 
