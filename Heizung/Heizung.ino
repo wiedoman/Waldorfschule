@@ -1,7 +1,7 @@
 char Version[] = "V3.7";
-// V3.7,
-//    Temperatursensorausfall schaltet failsafe auf Frostschutz, permanent 750W
-//    Uhrausfall ebenso Frostschutz aktivieren
+// V3.7a,
+//    Temperatursensorausfall schaltet failsafe auf Frostschutz, 4°C
+//    Uhrausfall failsafe Unterricht und blaue LED blinkt
 // V3.6,
 //    Lüftervorheizen ging in dem Fall Minute >= 45 verloren
 // V3.5,
@@ -67,7 +67,7 @@ char Version[] = "V3.7";
 
 #include <OneWire.h>                  // OneWire Bibliothek
 #include <DallasTemperature.h>        // Sensor Bibliothek
-//#include <Wire.h>                     // I2C Bibliothek
+#include <Wire.h>                     // I2C Bibliothek
 #include "RTClib.h"                   // Echtzeituhr Bibliothek
 
 #define ONE_WIRE_BUS 10               // Sensor an Pin 10
@@ -118,7 +118,7 @@ RTC_DS1307 RTC;                       // RTC Object
 #define dip4     6
 #define dip5     5
 #define dip6     4
-#define LEDrot  11                    // mittlerweise blaue LED am externen Bedienteil für Heizanforderungsbestätigung
+#define LEDblau  11                    // mittlerweise blaue LED am externen Bedienteil für Heizanforderungsbestätigung
 #define LEDgelb 12                    // gelbe LED an der Steuerung für die Anzeige ob mindestens ein Releis angesteuert wurde, blinken = geöffnetes Fenster erkannt
 #define Taster   2                    // Taster wg. Interruptsteuerung an PIN 2
 
@@ -177,8 +177,8 @@ void setup(void)
   digitalWrite(relais2, RelaisAus);
   pinMode(relais3, OUTPUT);            // Relais an Pin A2
   digitalWrite(relais3, RelaisAus);
-  pinMode(LEDrot, OUTPUT);             // rot LED an Pin 11
-  digitalWrite(LEDrot, LOW);
+  pinMode(LEDblau, OUTPUT);             // rot LED an Pin 11
+  digitalWrite(LEDblau, LOW);
   pinMode(LEDgelb, OUTPUT);            // gelb LED an Pin 12
   digitalWrite(LEDgelb, LOW);
   pinMode(dip1,   INPUT_PULLUP);       // DIP 1-6 an Pins 9-4
@@ -327,15 +327,15 @@ void loop(void)
       angefordert = false;              // Anforderungsstatus zurücknehmen für nächste Anforderung, dann wird das 2h Fenster neu begonnen
       HeizanforderungsEnde = now.unixtime()+vZHEIZ; // Heizanforderungszeit setzen auf 2 Stunden
       Serial.println(F("             Taster = 1       "));     // Heizanforderungstaste ausgeben
-      digitalWrite(LEDrot, false);      // Bestätigung für den Benutzer durch mehrmaliges Blinken der blauen LED
+      digitalWrite(LEDblau, false);      // Bestätigung für den Benutzer durch mehrmaliges Blinken der blauen LED
       delay(ENTPRELL);
-      digitalWrite(LEDrot, true);
+      digitalWrite(LEDblau, true);
       delay(ENTPRELL);
-      digitalWrite(LEDrot, false);
+      digitalWrite(LEDblau, false);
       delay(ENTPRELL);
-      digitalWrite(LEDrot, true);
+      digitalWrite(LEDblau, true);
       delay(ENTPRELL);
-      digitalWrite(LEDrot, false);
+      digitalWrite(LEDblau, false);
       delay(ENTPRELL);
     }
     else
@@ -369,9 +369,15 @@ void loop(void)
     if(!sehrKalt && now.hour() == 5 && temperatur <  7) {sehrKalt = 3; luefterVorheizen = true; heizungsStufePlus = 2;}
     if(!sehrKalt && now.hour() == 6 && temperatur < 13) {sehrKalt = 2; luefterVorheizen = true; heizungsStufePlus = 1;}
     if(!sehrKalt && now.hour() == 7 && temperatur < 22) {sehrKalt = 1; luefterVorheizen = true; heizungsStufePlus = 0;}
-    if (failSafeTime || failSafeTemp)
+    if (failSafeTemp)
     {
-      Serial.println(F("Failsafe Frostschutz"));
+      Serial.println(F("Failsafe Frostschutz Temperatursensor def."));
+    }
+    else if(failSafeTime)
+    {
+      Serial.println(F("Failsafe Unterricht Uhr def."));
+      Unterricht = true;
+      HeizanforderungsEnde = now.unixtime();
     }
     else if(now.dayOfTheWeek() == 0 || now.dayOfTheWeek() == 6)       // Samstag oder Sonntag = Wochenende
     {
@@ -396,7 +402,7 @@ void loop(void)
     Serial.print(F("  Anforderung Zeit  = "));              // Heizanforderung
     if(HeizanforderungsEnde > now.unixtime() || Unterricht) // Während der Heizanforderung oder Unterrichtszeit
     {
-      digitalWrite(LEDrot, HIGH);                           // rote LED an
+      digitalWrite(LEDblau, HIGH);                          // rote LED an
       if(HeizanforderungsEnde > now.unixtime())             // wenn Anforderung aufgrund Taster
       {                                                     // verbleibende Zeit berechnen      
         int z,h,m;
@@ -443,7 +449,7 @@ void loop(void)
     }
     else                                                   // wenn keine Heizanforderung 
     {
-      digitalWrite(LEDrot, LOW);                           // dann rote LED aus   
+      digitalWrite(LEDblau, LOW);                           // dann blaue LED aus   
       Serial.println(F("0s           "));                  // Ausgeben
       relAn = 0;                                           // Und Relais aus
       heizungsLuefter = false;luefterVorheizen = false;    // Heizlüfter aus
@@ -456,6 +462,13 @@ void loop(void)
     Serial.print(F("seit ltz. Reduktion = "));      // Ausgabe des 10min Zeitfensters
     Serial.print(now.unixtime() - stufenReduktion);Serial.print(F("s (max "));Serial.print(vZSTUFE);Serial.println(F("s)             "));
     
+    // ++++++++++++++++++++++++++++++ Blaue LED blinken lassen wenn Uhr defekt
+    if (failSafeTime)
+    {
+      if (blinken)blinken=false;else blinken = true;
+      digitalWrite(LEDblau, blinken);
+    }
+
     // ++++++++++++++++++++++++++++++ Heizrelais schalten
     Serial.print(F(" Heizungsrelais 1,2 = "));  // Status der Relais ausgeben und Relais schalten ...
     if(relAn)
