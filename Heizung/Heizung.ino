@@ -1,4 +1,9 @@
-char Version[] = "V3.5";
+char Version[] = "V3.7";
+// V3.7,
+//    Temperatursensorausfall schaltet failsafe auf Frostschutz, permanent 750W
+//    Uhrausfall ebenso Frostschutz aktivieren
+// V3.6,
+//    Lüftervorheizen ging in dem Fall Minute >= 45 verloren
 // V3.5,
 //    Vorheizen reduziert. Anpassung an höhere Heizleistung
 //    Code umstrukturiert und besser kommentiert
@@ -62,7 +67,7 @@ char Version[] = "V3.5";
 
 #include <OneWire.h>                  // OneWire Bibliothek
 #include <DallasTemperature.h>        // Sensor Bibliothek
-#include <Wire.h>                     // I2C Bibliothek
+//#include <Wire.h>                     // I2C Bibliothek
 #include "RTClib.h"                   // Echtzeituhr Bibliothek
 
 #define ONE_WIRE_BUS 10               // Sensor an Pin 10
@@ -94,7 +99,7 @@ float temperatur=sollTEMP,SollTemperatur,lueftTemperatur=-100,regelAbweichung,vT
 signed char DIP=0;                                              // DIP Schalter für Temperaturkorrekturen
 int relAn=0,SZ=0,heizungsStufe=0,heizungsStufePlus=0,relAnAlt=0;
 uint32_t HeizanforderungsEnde=0, intervallZeit=0, lueftenBeginn, stufenReduktion, anforderungAnZeit, anforderungAusZeit;    // Zeitstempel 
-uint8_t tasterAlt=true,tasterLow=false,luefterVorheizen=false,luefterVorheizenA=false,heizungsLuefterAnforderung=false,heizungsLuefter=false,angefordert=false,Unterricht=false,lueften=false,blinken=false,sehrKalt=0,inByte,frostSchutz=false;
+uint8_t tasterAlt=true,tasterLow=false,luefterVorheizen=false,heizungsLuefterAnforderung=false,heizungsLuefter=false,angefordert=false,Unterricht=false,lueften=false,blinken=false,sehrKalt=0,inByte,frostSchutz=false,failSafeTemp=false,failSafeTime=false;
 unsigned long loopzeit;                                         // millis() Ergbenis
 
 uint8_t vTFROST; // Debugwerte
@@ -223,7 +228,8 @@ void loop(void)
     Serial.print(F("."));
     Serial.print(now.month(), DEC);
     Serial.print(F("."));
-    Serial.print(now.year(), DEC);      
+    Serial.print(now.year(), DEC); 
+    if (now.year() < 2017) failSafeTime = true; else failSafeTime = false;     
     Serial.print(F(" "));
     Serial.print(now.hour(), DEC);
     Serial.print(F(":"));
@@ -276,13 +282,16 @@ void loop(void)
     sensor.requestTemperatures();                        // Temperatur von Sensor holen
     if (sensor.getTempC(insideThermometer) < TLUEFTinit) // Ist der Sensor fehlerhaft, dann ist der Wert -127°C
     {
+      temperatur = 4;                                    // Frostschutz failsafe
+      failSafeTemp = true;
       Serial.print(F("      Isttemperatur = "));         // und ausgeben
-      Serial.print(temperatur);Serial.println(F("°C Altwert wg. fehlerhaftem Sensor")); 
+      Serial.print(temperatur);Serial.println(F("°C Frostschutz wg. fehlerhaftem Sensor")); 
     }
     else
     {
       temperatur = sensor.getTempC(insideThermometer);  // bei nicht fehlerhaftem Sensorwert wird er übernommen
       if (vTIST) temperatur = vTIST;                    // DEBUG
+      failSafeTemp = false;
       Serial.print(F("      Isttemperatur = "));        // und ausgegeben
       Serial.print(temperatur);Serial.println(F("°C                                 "));
     }
@@ -356,11 +365,15 @@ void loop(void)
     // Unterrichtszeit ? Dann heizen von 05:00 bis 17:00, wenn nicht kalt kann sich der Heizbeginn bis 07:00 verzögern
     Serial.print(F("         Auswertung = "));     // Ausgabe Ferien oder Unterricht
     if(now.hour() >= 8) sehrKalt = 0;              // Die Vorheizanforderung wird nach Unterrichtsbeginn zurück genommen
-    if(now.hour() >= 7 && now.minute() >= 45) luefterVorheizen = false;   // Die Lüfteranforderung durch das Vorheizen wird 15min vor Unterrichtsbeginn zurück genommen
+    if(now.hour() == 7 && now.minute() >= 45) luefterVorheizen = false;   // Die Lüfteranforderung durch das Vorheizen wird 15min vor Unterrichtsbeginn zurück genommen
     if(!sehrKalt && now.hour() == 5 && temperatur <  7) {sehrKalt = 3; luefterVorheizen = true; heizungsStufePlus = 2;}
     if(!sehrKalt && now.hour() == 6 && temperatur < 13) {sehrKalt = 2; luefterVorheizen = true; heizungsStufePlus = 1;}
     if(!sehrKalt && now.hour() == 7 && temperatur < 22) {sehrKalt = 1; luefterVorheizen = true; heizungsStufePlus = 0;}
-    if(now.dayOfTheWeek() == 0 || now.dayOfTheWeek() == 6)       // Samstag oder Sonntag = Wochenende
+    if (failSafeTime || failSafeTemp)
+    {
+      Serial.println(F("Failsafe Frostschutz"));
+    }
+    else if(now.dayOfTheWeek() == 0 || now.dayOfTheWeek() == 6)       // Samstag oder Sonntag = Wochenende
     {
       Serial.println(F("Wochenende          "));           // Ausgabe des Status ob Wochende oder Ferien oder Unterricht 
       Unterricht = false;                                  // Nur wenn Unterricht erkannt wird, wird automatisch geheizt, bzw. bei sehr tiefen Temperaturen entsprechend vorgeheizt
