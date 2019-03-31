@@ -5,7 +5,7 @@
  Version 2.0 Geänderter Aufbau mit RTC-DCF77 von ELV für genaue Atum-Uhrzeit per Funk
  Version 3.0 Code aufgeräumt und dokumentiert sowie um Kathodenreinigungsfunktion und Abschaltung in der Nacht ergänzt
  Version 4.0 DCF77 liefert manchmal ungültige Zeit, diese werden erkannt und es wird neu empfangen
- Version 6a  DCF77 entfernt und durch RTC von dfrobot ersetzt, Stellknopf: einmal drücken Stellmodus an und dann kann minutenweise die Uhr gestellt werden. Erneutes Drücken beendet den Stellmodus
+ Version 6a  DCF77 entfernt und durch RTC von dfrobot ersetzt, Stellknopf: einmal drücken Stellmodus an und dann kann minutenweise die Uhr gestellt werden. Erneutes Drücken beendet den Stellmodus. Daten bis 2023 ergänzt.
 
  Debugmöglichkeit über serielle Schnittstelle
   Eingabe von z.B. 12:00:00 + Enter setzt die Zeit, es wird der : detektiert
